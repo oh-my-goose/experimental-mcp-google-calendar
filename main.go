@@ -44,11 +44,21 @@ func main() {
 	// 	fmt.Printf("Error starting server: %v\n", err)
 	// }
 
-	host := "localhost"
-	port := "12345"
+	host := os.Getenv("HOST")
+	if host == "" {
+		host = "0.0.0.0" // for binding
+	}
+	advertisedHost := os.Getenv("ADVERTISED_HOST")
+	if advertisedHost == "" {
+		advertisedHost = "localhost" // for client connections
+	}
+	port := os.Getenv("PORT")
+	if port == "" {
+		port = "12345"
+	}
 
 	sseServer := server.NewSSEServer(mcpServer,
-		server.WithBaseURL(fmt.Sprintf("http://%s:%s", host, port)),
+		server.WithBaseURL(fmt.Sprintf("http://%s:%s", advertisedHost, port)),
 		server.WithStaticBasePath("/mcp"),
 	)
 
