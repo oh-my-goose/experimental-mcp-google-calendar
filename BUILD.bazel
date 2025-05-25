@@ -45,6 +45,13 @@ oci_image(
         "org.opencontainers.image.source": "https://github.com/aspect-build/bazel-examples",
     },
     tars = [":app_layer"],
+    env = {
+        "HOST": "0.0.0.0",
+        "PORT": "5555",
+    },
+    exposed_ports = [
+        "5555/tcp",
+    ],
 )
 
 # This is the target that should be released to the target platform
@@ -67,5 +74,5 @@ oci_load(
     name = "build_image",
     # Use the image built for the target platform
     image = ":transitioned_image",
-    repo_tags = ["gcr.io/example:latest"],
+    repo_tags = ["gcr.io/mcp-google-calendar:latest"],
 )
