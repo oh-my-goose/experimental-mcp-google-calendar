@@ -64,7 +64,7 @@ platform_transition_filegroup(
 # +       "Hello Go",
 #   )
 oci_load(
-    name = "load",
+    name = "build_image",
     # Use the image built for the target platform
     image = ":transitioned_image",
     repo_tags = ["gcr.io/example:latest"],
