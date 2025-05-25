@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"log"
 	"net/http"
@@ -17,14 +16,37 @@ import (
 )
 
 var (
+	oauthConfig *oauth2.Config
+	state = "random" // could be a secure random value for production
 	calendarService *calendar.Service
 )
 
 func main() {
-	// // Initialize Google Calendar service
-	// if err := initCalendarService(); err != nil {
-	// 	log.Fatalf("Failed to initialize Calendar service: %v", err)
-	// }
+	host := os.Getenv("HOST")
+	if host == "" {
+		host = "localhost" // for binding
+	}
+	advertisedHost := os.Getenv("ADVERTISED_HOST")
+	if advertisedHost == "" {
+		advertisedHost = "localhost" // for client connections
+	}
+	port := os.Getenv("PORT")
+	if port == "" {
+		port = "5555"
+	}
+
+	oauthConfig = &oauth2.Config{
+		ClientID:     os.Getenv("GOOGLE_CLIENT_ID"),
+		ClientSecret: os.Getenv("GOOGLE_CLIENT_SECRET"),
+		RedirectURL:  fmt.Sprintf("http://%s:%s/auth/callback", advertisedHost, port),
+		Scopes: []string{
+			"https://www.googleapis.com/auth/userinfo.email",       // For SSO
+			"https://www.googleapis.com/auth/userinfo.profile",     // For SSO
+			"https://www.googleapis.com/auth/calendar.readonly",    // For Calendar
+			"openid",                                                // OpenID for ID token
+		},
+		Endpoint: google.Endpoint,
+	}
 
 	// Create a new MCP server
 	mcpServer := server.NewMCPServer(
@@ -39,30 +61,13 @@ func main() {
 	// Define tools
 	setupTools(mcpServer)
 
-	// Start the server
-	// if err := server.ServeStdio(s); err != nil {
-	// 	fmt.Printf("Error starting server: %v\n", err)
-	// }
-
-	host := os.Getenv("HOST")
-	if host == "" {
-		host = "0.0.0.0" // for binding
-	}
-	advertisedHost := os.Getenv("ADVERTISED_HOST")
-	if advertisedHost == "" {
-		advertisedHost = "localhost" // for client connections
-	}
-	port := os.Getenv("PORT")
-	if port == "" {
-		port = "12345"
-	}
-
 	sseServer := server.NewSSEServer(mcpServer,
 		server.WithBaseURL(fmt.Sprintf("http://%s:%s", advertisedHost, port)),
 		server.WithStaticBasePath("/mcp"),
 	)
 
 	mux := http.NewServeMux()
+	mux.HandleFunc("/auth/callback", handleCallback)
 	mux.Handle("/mcp/sse", sseServer.SSEHandler())
 	mux.Handle("/mcp/message", sseServer.MessageHandler())
 
@@ -72,94 +77,49 @@ func main() {
 	}
 }
 
-func initCalendarService() error {
-	ctx := context.Background()
-
-	// Read credentials file
-	credentialsFile := os.Getenv("GOOGLE_CREDENTIALS_FILE")
-	if credentialsFile == "" {
-		credentialsFile = "credentials.json"
+func handleCallback(w http.ResponseWriter, r *http.Request) {
+	if r.URL.Query().Get("state") != state {
+		http.Error(w, "state mismatch", http.StatusBadRequest)
+		return
 	}
 
-	b, err := os.ReadFile(credentialsFile)
+	code := r.URL.Query().Get("code")
+	token, err := oauthConfig.Exchange(context.Background(), code)
 	if err != nil {
-		return fmt.Errorf("unable to read client secret file: %v", err)
+		http.Error(w, "token exchange failed", http.StatusInternalServerError)
+		return
 	}
 
-	// Configure OAuth2
-	config, err := google.ConfigFromJSON(b, calendar.CalendarScope)
+	// Initialize the global calendarService
+	tokenSource := oauthConfig.TokenSource(context.Background(), token)
+	srv, err := calendar.NewService(context.Background(), option.WithTokenSource(tokenSource))
 	if err != nil {
-		return fmt.Errorf("unable to parse client secret file to config: %v", err)
+		http.Error(w, fmt.Sprintf("Unable to create Calendar service: %v", err), http.StatusInternalServerError)
+		return
 	}
-
-	client := getClient(config)
-
-	// Create Calendar service
-	srv, err := calendar.NewService(ctx, option.WithHTTPClient(client))
-	if err != nil {
-		return fmt.Errorf("unable to retrieve Calendar client: %v", err)
-	}
-
 	calendarService = srv
-	return nil
-}
-
-func getClient(config *oauth2.Config) *http.Client {
-	// Try to load token from file
-	tokenFile := "token.json"
-	tok, err := tokenFromFile(tokenFile)
-	if err != nil {
-		tok = getTokenFromWeb(config)
-		saveToken(tokenFile, tok)
-	}
-	return config.Client(context.Background(), tok)
-}
-
-func getTokenFromWeb(config *oauth2.Config) *oauth2.Token {
-	authURL := config.AuthCodeURL("state-token", oauth2.AccessTypeOffline)
-	fmt.Printf("Go to the following link in your browser then type the "+
-		"authorization code: \n%v\n", authURL)
-
-	var authCode string
-	if _, err := fmt.Scan(&authCode); err != nil {
-		log.Fatalf("Unable to read authorization code: %v", err)
-	}
-
-	tok, err := config.Exchange(context.TODO(), authCode)
-	if err != nil {
-		log.Fatalf("Unable to retrieve token from web: %v", err)
-	}
-	return tok
-}
-
-func tokenFromFile(file string) (*oauth2.Token, error) {
-	f, err := os.Open(file)
-	if err != nil {
-		return nil, err
-	}
-	defer f.Close()
-	tok := &oauth2.Token{}
-	err = json.NewDecoder(f).Decode(tok)
-	return tok, err
-}
-
-func saveToken(path string, token *oauth2.Token) {
-	fmt.Printf("Saving credential file to: %s\n", path)
-	f, err := os.OpenFile(path, os.O_RDWR|os.O_CREATE|os.O_TRUNC, 0600)
-	if err != nil {
-		log.Fatalf("Unable to cache oauth token: %v", err)
-	}
-	defer f.Close()
-	json.NewEncoder(f).Encode(token)
 }
 
 func setupTools(s *server.MCPServer) {
+	// Lazy auth tool
+	authTool := mcp.NewTool("auth",
+		mcp.WithDescription("Authenticate with Google Calendar to use the other tools. Use it when you run into authentication issues."),
+	)
+
+	s.AddTool(authTool, func(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+		url := oauthConfig.AuthCodeURL(state, oauth2.AccessTypeOffline)
+		return mcp.NewToolResultText(fmt.Sprintf("Please visit this URL to authenticate: %s", url)), nil
+	})
+
 	// List calendars tool
 	listCalendarsTool := mcp.NewTool("list_calendars",
 		mcp.WithDescription("List all accessible Google Calendars"),
 	)
 
 	s.AddTool(listCalendarsTool, func(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+		if calendarService == nil {
+			return mcp.NewToolResultText("plz authenticate and retry"), nil
+		}
 		calendarList, err := calendarService.CalendarList.List().Do()
 		if err != nil {
 			return mcp.NewToolResultText(fmt.Sprintf("Error listing calendars: %v", err)), nil
@@ -193,6 +153,9 @@ func setupTools(s *server.MCPServer) {
 	)
 
 	s.AddTool(listEventsTool, func(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+		if calendarService == nil {
+			return mcp.NewToolResultText("plz authenticate and retry"), nil
+		}
 		args := request.Params.Arguments.(map[string]any)
 		calendarID := args["calendar_id"].(string)
 		maxResults := int64(args["max_results"].(float64))
@@ -256,6 +219,9 @@ func setupTools(s *server.MCPServer) {
 	)
 
 	s.AddTool(createEventTool, func(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+		if calendarService == nil {
+			return mcp.NewToolResultText("plz authenticate and retry"), nil
+		}
 		args := request.Params.Arguments.(map[string]any)
 		calendarID := args["calendar_id"].(string)
 		summary := args["summary"].(string)
@@ -304,6 +270,9 @@ func setupTools(s *server.MCPServer) {
 	)
 
 	s.AddTool(getEventTool, func(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+		if calendarService == nil {
+			return mcp.NewToolResultText("plz authenticate and retry"), nil
+		}
 		args := request.Params.Arguments.(map[string]any)
 		calendarID := args["calendar_id"].(string)
 		eventID := args["event_id"].(string)
@@ -355,6 +324,9 @@ HTML Link: %s`,
 	)
 
 	s.AddTool(deleteEventTool, func(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+		if calendarService == nil {
+			return mcp.NewToolResultText("plz authenticate and retry"), nil
+		}
 		args := request.Params.Arguments.(map[string]any)
 		calendarID := args["calendar_id"].(string)
 		eventID := args["event_id"].(string)
