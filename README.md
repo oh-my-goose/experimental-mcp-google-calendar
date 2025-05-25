@@ -1,7 +1,10 @@
 
 # Net New
 
-<div style="position: relative; padding-bottom: 62.391681109185434%; height: 0;"><iframe src="https://www.loom.com/embed/ee2f6df5ee874c4687484909eb37a9a0?sid=8b2fb4be-5e23-4547-a557-da63fd1fe6f2" frameborder="0" webkitallowfullscreen mozallowfullscreen allowfullscreen style="position: absolute; top: 0; left: 0; width: 100%; height: 100%;"></iframe></div>
+<a href="https://www.loom.com/embed/ee2f6df5ee874c4687484909eb37a9a0?sid=8b2fb4be-5e23-4547-a557-da63fd1fe6f2">
+  <img src="docs/video-intro.png" alt="Video Introduction" style="width: 100%;">
+</a>
+
 
 # Usage
 
