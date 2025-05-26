@@ -6,6 +6,7 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"time"
 
 	"github.com/mark3labs/mcp-go/mcp"
 	"github.com/mark3labs/mcp-go/server"
@@ -109,6 +110,28 @@ func setupTools(s *server.MCPServer) {
 	s.AddTool(authTool, func(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 		url := oauthConfig.AuthCodeURL(state, oauth2.AccessTypeOffline)
 		return mcp.NewToolResultText(fmt.Sprintf("Please visit this URL to authenticate: %s", url)), nil
+	})
+
+	// Get current time tool
+	getCurrentTimeTool := mcp.NewTool("get_current_time",
+		mcp.WithDescription("Get the current time in a specific timezone"),
+		mcp.WithString("timezone",
+			mcp.Description("The timezone to get the current time in (e.g., 'America/New_York', 'UTC', 'Asia/Tokyo')"),
+			mcp.DefaultString("UTC"),
+		),
+	)
+
+	s.AddTool(getCurrentTimeTool, func(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+		args := request.Params.Arguments.(map[string]any)
+		timezone := args["timezone"].(string)
+
+		loc, err := time.LoadLocation(timezone)
+		if err != nil {
+			return mcp.NewToolResultText(fmt.Sprintf("Invalid timezone: %v", err)), nil
+		}
+
+		currentTime := time.Now().In(loc)
+		return mcp.NewToolResultText(fmt.Sprintf("Current time in %s: %s", timezone, currentTime.Format(time.RFC3339))), nil
 	})
 
 	// List calendars tool
