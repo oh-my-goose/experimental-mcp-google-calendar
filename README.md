@@ -52,7 +52,7 @@ $ GOOGLE_CLIENT_ID=$GOOGLE_CLIENT_ID \
 $ curl -N http://localhost:5555/mcp/sse
 ```
 
-## Toll query
+## Tool query
 
 Let's use `auth` as example:
 
