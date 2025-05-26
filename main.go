@@ -16,9 +16,11 @@ import (
 	"google.golang.org/api/option"
 )
 
+const TOOL_ERROR_AUTHENTICATION_REQUIRED = "plz authenticate with Google Calendar and retry"
+
 var (
 	oauthConfig *oauth2.Config
-	state = "random" // could be a secure random value for production
+	state = "stateless" // could be a secure random value for production
 	calendarService *calendar.Service
 )
 
@@ -68,7 +70,7 @@ func main() {
 	)
 
 	mux := http.NewServeMux()
-	mux.HandleFunc("/auth/callback", handleCallback)
+	mux.HandleFunc("/auth/callback", handleAuthCallback(mcpServer))
 	mux.Handle("/mcp/sse", sseServer.SSEHandler())
 	mux.Handle("/mcp/message", sseServer.MessageHandler())
 
@@ -77,38 +79,96 @@ func main() {
 		log.Fatalf("Server error: %v", err)
 	}
 }
+func handleAuthCallback(server *server.MCPServer) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		code := r.URL.Query().Get("code")
+		token, err := oauthConfig.Exchange(context.Background(), code)
+		if err != nil {
+			fmt.Println("token exchange failed")
+			http.Error(w, "token exchange failed", http.StatusInternalServerError)
+			return
+		}
 
-func handleCallback(w http.ResponseWriter, r *http.Request) {
-	if r.URL.Query().Get("state") != state {
-		http.Error(w, "state mismatch", http.StatusBadRequest)
-		return
-	}
+		forMethod := r.URL.Query().Get("state")
+		if state == "" {
+			fmt.Println("state is required")
+			http.Error(w, "state is required", http.StatusBadRequest)
+			return
+		}
 
-	code := r.URL.Query().Get("code")
-	token, err := oauthConfig.Exchange(context.Background(), code)
-	if err != nil {
-		http.Error(w, "token exchange failed", http.StatusInternalServerError)
-		return
-	}
+		// Initialize the global calendarService
+		tokenSource := oauthConfig.TokenSource(context.Background(), token)
+		srv, err := calendar.NewService(context.Background(), option.WithTokenSource(tokenSource))
+		if err != nil {
+			http.Error(w, fmt.Sprintf("Unable to create Calendar service: %v", err), http.StatusInternalServerError)
+			return
+		}
+		calendarService = srv
 
-	// Initialize the global calendarService
-	tokenSource := oauthConfig.TokenSource(context.Background(), token)
-	srv, err := calendar.NewService(context.Background(), option.WithTokenSource(tokenSource))
-	if err != nil {
-		http.Error(w, fmt.Sprintf("Unable to create Calendar service: %v", err), http.StatusInternalServerError)
-		return
+		// Notify the client to continue the method that requested authentication
+		// Note: Some MCP clients may not support this yet. e.g. Cursor
+		fmt.Println("sending notification to client")
+		server.SendNotificationToClient(
+			context.Background(),
+			forMethod,
+			map[string]any{},
+		)
+		fmt.Println("sent notification to client")
 	}
-	calendarService = srv
 }
 
 func setupTools(s *server.MCPServer) {
 	// Lazy auth tool
 	authTool := mcp.NewTool("auth",
 		mcp.WithDescription("Authenticate with Google Calendar to use the other tools. Use it when you run into authentication issues."),
+		mcp.WithString("for_method",
+			mcp.Description("The method that requires authentication"),
+		),
 	)
 
 	s.AddTool(authTool, func(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-		url := oauthConfig.AuthCodeURL(state, oauth2.AccessTypeOffline)
+		// FIXME: Protocol support of multi-turn tool responses is not finalized / implemented yet.
+		// Latest support: https://modelcontextprotocol.io/specification/2025-03-26/basic/utilities/progress
+		// Discussion: https://github.com/modelcontextprotocol/modelcontextprotocol/discussions/314
+		// Difference of MCP and A2D: https://docs.google.com/document/d/18aW0P38h14ccJTkN-irhy2NVdG-_V_Oe7WblnAiKKGM/edit?tab=t.0
+
+		// session := server.ClientSessionFromContext(ctx)
+		// url := oauthConfig.AuthCodeURL(state, oauth2.AccessTypeOffline)
+		// session.NotificationChannel() <- mcp.JSONRPCNotification{
+		// 	Notification: mcp.Notification{
+		// 		Method: "Please visit this URL to authenticate: " + url,
+		// 	},
+		// }
+
+		// for {
+		// 	select {
+		// 	case <-ctx.Done():
+		// 		if calendarService != nil {
+		// 			return mcp.NewToolResultText("Authentication timed out. Please try again."), nil
+		// 		}
+		// 		break
+		// 	default:
+		// 		if calendarService != nil {
+		// 			break
+		// 		}
+		// 		time.Sleep(2 * time.Second)
+		// 	}
+		// }
+
+		args := request.Params.Arguments.(map[string]any)
+		forMethod, _ := args["for_method"].(string)
+
+		// Copy oauthConfig and add for_method to the redirect URL
+		newConfig := *oauthConfig // shallow copy is fine since all fields are value or immutable
+		// FIXME: Google OAuth2 is strict about the redirect URL, so we need to use a different approach
+		// redirectURL, _ := url.Parse(oauthConfig.RedirectURL)
+		// query := redirectURL.Query()
+		// query.Set("for_method", forMethod)
+		// redirectURL.RawQuery = query.Encode()
+		// fmt.Println(redirectURL.String())
+		// newConfig.RedirectURL = redirectURL.String()
+
+		url := newConfig.AuthCodeURL(forMethod, oauth2.AccessTypeOffline)
 		return mcp.NewToolResultText(fmt.Sprintf("Please visit this URL to authenticate: %s", url)), nil
 	})
 
@@ -141,7 +201,7 @@ func setupTools(s *server.MCPServer) {
 
 	s.AddTool(listCalendarsTool, func(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 		if calendarService == nil {
-			return mcp.NewToolResultText("plz authenticate and retry"), nil
+			return mcp.NewToolResultError(TOOL_ERROR_AUTHENTICATION_REQUIRED), nil
 		}
 		calendarList, err := calendarService.CalendarList.List().Do()
 		if err != nil {
@@ -177,7 +237,7 @@ func setupTools(s *server.MCPServer) {
 
 	s.AddTool(listEventsTool, func(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 		if calendarService == nil {
-			return mcp.NewToolResultText("plz authenticate and retry"), nil
+			return mcp.NewToolResultError(TOOL_ERROR_AUTHENTICATION_REQUIRED), nil
 		}
 		args := request.Params.Arguments.(map[string]any)
 		calendarID := args["calendar_id"].(string)
@@ -243,7 +303,7 @@ func setupTools(s *server.MCPServer) {
 
 	s.AddTool(createEventTool, func(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 		if calendarService == nil {
-			return mcp.NewToolResultText("plz authenticate and retry"), nil
+			return mcp.NewToolResultError(TOOL_ERROR_AUTHENTICATION_REQUIRED), nil
 		}
 		args := request.Params.Arguments.(map[string]any)
 		calendarID := args["calendar_id"].(string)
@@ -294,7 +354,7 @@ func setupTools(s *server.MCPServer) {
 
 	s.AddTool(getEventTool, func(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 		if calendarService == nil {
-			return mcp.NewToolResultText("plz authenticate and retry"), nil
+			return mcp.NewToolResultError(TOOL_ERROR_AUTHENTICATION_REQUIRED), nil
 		}
 		args := request.Params.Arguments.(map[string]any)
 		calendarID := args["calendar_id"].(string)
@@ -348,7 +408,7 @@ HTML Link: %s`,
 
 	s.AddTool(deleteEventTool, func(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 		if calendarService == nil {
-			return mcp.NewToolResultText("plz authenticate and retry"), nil
+			return mcp.NewToolResultError(TOOL_ERROR_AUTHENTICATION_REQUIRED), nil
 		}
 		args := request.Params.Arguments.(map[string]any)
 		calendarID := args["calendar_id"].(string)
